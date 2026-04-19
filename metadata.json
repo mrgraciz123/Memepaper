@@ -1,0 +1,6 @@
+{
+  "name": "MemePaper",
+  "description": "Real-time India news meme generator. Fetches live headlines and serves them as funny Hinglish memes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
