@@ -432,6 +432,9 @@
           </article>
         <% }); %>
       </div>
+      <div id="infinite-scroll-trigger" style="text-align: center; padding: 40px; font-weight: 600; color: #666; font-size: 14px;">
+        Scroll down for more memes 👇
+      </div>
     <% } else { %>
       <div class="empty-state">
         <h2>😭 Yaar, news nahi mila</h2>
@@ -461,21 +464,30 @@
 
   <script>
     const modal = document.getElementById('shareModal');
-    const shareBtns = document.querySelectorAll('.share-btn');
     const closeBtn = document.getElementById('closeModal');
     const shareForm = document.getElementById('shareForm');
     let currentMeme = null;
 
-    shareBtns.forEach(btn => {
-      btn.addEventListener('click', () => {
-        try {
-          currentMeme = JSON.parse(decodeURIComponent(btn.getAttribute('data-meme')));
-          modal.showModal();
-        } catch (e) {
-          console.error("Failed to parse meme data", e);
-        }
+    function bindShareButtons() {
+      const shareBtns = document.querySelectorAll('.share-btn');
+      shareBtns.forEach(btn => {
+        // Prevent duplicate bindings
+        if (btn.dataset.bound) return;
+        btn.dataset.bound = "true";
+        
+        btn.addEventListener('click', () => {
+          try {
+            currentMeme = JSON.parse(decodeURIComponent(btn.getAttribute('data-meme')));
+            modal.showModal();
+          } catch (e) {
+            console.error("Failed to parse meme data", e);
+          }
+        });
       });
-    });
+    }
+
+    // Initial bind
+    bindShareButtons();
 
     closeBtn.addEventListener('click', () => {
       modal.close();
@@ -514,6 +526,100 @@
         submitBtn.disabled = false;
       }
     });
+
+    // Infinite Scroll Logic
+    let currentPage = 1;
+    let isLoading = false;
+    let hasMore = true;
+    const scrollTrigger = document.getElementById('infinite-scroll-trigger');
+    const memeGrid = document.querySelector('.meme-grid');
+
+    if (scrollTrigger && memeGrid) {
+      const observer = new IntersectionObserver((entries) => {
+        if (entries[0].isIntersecting && !isLoading && hasMore) {
+          loadMoreMemes();
+        }
+      }, { rootMargin: "200px" });
+      observer.observe(scrollTrigger);
+    }
+
+    async function loadMoreMemes() {
+      isLoading = true;
+      currentPage++;
+      scrollTrigger.innerHTML = "Generating more memes... ⏳😂";
+
+      try {
+        const res = await fetch(`/api/memes?page=${currentPage}`);
+        const data = await res.json();
+        
+        if (!data.memes || data.memes.length === 0) {
+          hasMore = false;
+          scrollTrigger.innerHTML = "No more news to meme! 🛑";
+          return;
+        }
+
+        data.memes.forEach((card, index) => {
+           const memeHtml = `
+            <article class="meme-card" style="border-color: ${card.accent.border}; animation-delay: calc(${index} * 0.08s);">
+              <div class="accent-top" style="background: ${card.accent.border}"></div>
+              <div class="card-content">
+                <div class="card-header">
+                  <span class="badge" style="background: ${card.accent.border}">
+                    🔥 MEME
+                  </span>
+                  <div class="source-time">
+                    <b>${card.article.source}</b><br>
+                    ${card.article.pubDate}
+                  </div>
+                </div>
+                <div>
+                  <span class="category">${card.categoryIcon} ${card.article.category}</span>
+                </div>
+                <div class="meme-text">
+                  ${card.caption}
+                </div>
+                <div class="divider"></div>
+                <div style="font-size:9px; font-weight:700; color:#aaa; margin-bottom:4px; text-transform:uppercase;">📰 ACTUAL NEWS</div>
+                <div class="actual-news">
+                  <b style="color: #444;">${card.article.title}</b><br>
+                  ${card.article.description}
+                </div>
+                <div class="card-actions">
+                  <button 
+                    class="share-btn" 
+                    style="color: ${card.accent.border}; border: 2px solid ${card.accent.border};"
+                    data-meme='${encodeURIComponent(JSON.stringify({
+                      caption: card.caption,
+                      headline: card.article.title,
+                      description: card.article.description,
+                      source: card.article.source,
+                      pubDate: card.article.pubDate,
+                      url: card.article.url
+                    }))}'
+                  >
+                    ✉️ Share
+                  </button>
+                  <a href="${card.article.url}" target="_blank" class="read-more-btn" style="background: ${card.accent.border}">
+                    Read Full Story &rarr;
+                  </a>
+                </div>
+              </div>
+            </article>`;
+            memeGrid.insertAdjacentHTML('beforeend', memeHtml);
+        });
+
+        // Rebind share modal to new buttons dynamically
+        bindShareButtons();
+        
+      } catch (err) {
+        console.error(err);
+        scrollTrigger.innerHTML = "Error loading. Scroll up and down to retry! 🔄";
+        currentPage--;
+      }
+      
+      if(hasMore) scrollTrigger.innerHTML = "Scroll down for more memes 👇";
+      isLoading = false;
+    }
   </script>
 
 </body>

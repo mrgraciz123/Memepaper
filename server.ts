@@ -5,7 +5,7 @@ import path from 'path';
 import { Resend } from 'resend';
 import fs from 'fs';
 import dotenv from 'dotenv';
-import OpenAI from 'openai';
+import { GoogleGenAI } from '@google/genai';
 
 // Load variables from .env.example since that's where the key was placed
 dotenv.config({ path: '.env.example' });
@@ -244,13 +244,17 @@ function formatDateFromStr(dateStr: string): string {
   }
 }
 
+let cachedNewsCache: any[] = [];
+let lastNewsFetchTime: number = 0;
+const CACHE_TTL = 15 * 60 * 1000; // 15 mins
+
 async function fetchNews() {
+  if (cachedNewsCache.length > 0 && (Date.now() - lastNewsFetchTime < CACHE_TTL)) {
+    return cachedNewsCache;
+  }
   const articles: any[] = [];
   
-  // Need to abort individual fetches if they take too long
   for (const feed of RSS_FEEDS) {
-    if (articles.length >= 8) break;
-
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 8000);
@@ -264,9 +268,11 @@ async function fetchNews() {
       const xmlText = await xmlDataFetch.text();
       const parsed = await parser.parseString(xmlText);
 
+      // Fetch a maximum of 15 articles per feed to ensure a healthy backlog for infinite scrolling
+      let count = 0;
       for (const item of parsed.items || []) {
-        if (articles.length >= 8) break;
-        
+        if (count >= 15) break;
+
         let title = (item.title || "").trim();
         if (!title) continue;
         
@@ -275,7 +281,6 @@ async function fetchNews() {
           continue;
         }
 
-        // Deduplication
         const isDuplicate = articles.some(existing => sharesConsecutiveWords(existing.title, title));
         if (isDuplicate) continue;
 
@@ -296,6 +301,7 @@ async function fetchNews() {
           source: feed.source,
           category
         });
+        count++;
       }
     } catch (e) {
       console.error(`Failed fetching feed from ${feed.source}`, e);
@@ -307,51 +313,77 @@ async function fetchNews() {
     return FALLBACK_HEADLINES;
   }
 
+  // Shuffle array slightly so feeds mix
+  articles.sort(() => Math.random() - 0.5);
+
+  cachedNewsCache = articles;
+  lastNewsFetchTime = Date.now();
   return articles;
 }
 
-app.get('/', async (req, res) => {
-  try {
-    const articles = await fetchNews();
-    
-    // Dynamic Memes generated via Grok API
-    const grokApiKey = process.env.GROK_API_KEY;
-    let captions: string[] = [];
+async function generateMemesForArticles(articles: any[]) {
+  const geminiApiKey = process.env.GEMINI_API_KEY;
+  let captions: string[] = [];
 
-    if (grokApiKey && articles.length > 0) {
-      try {
-        const openai = new OpenAI({
-          apiKey: grokApiKey,
-          baseURL: "https://api.x.ai/v1", // Using xAI endpoint
-        });
+  if (geminiApiKey && articles.length > 0) {
+    try {
+      const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
-        const prompt = `You are a hilarious Indian meme generator. Generate a short, funny, sarcastic Hinglish (Hindi + English) meme caption for each of these news headlines. Return ONLY a valid JSON array of strings containing the captions in the exact same order. Do not include markdown formatting (\`\`\`json).\n\nHeadlines:\n${articles.map((a, i) => `${i+1}. ${a.title}`).join('\n')}`;
+      const prompt = `You are a hilarious Indian meme generator. Generate a short, funny, sarcastic Hinglish (Hindi + English) meme caption for each of these news headlines. Return ONLY a valid JSON array of strings containing the captions in the exact same order. Do not include markdown formatting (\`\`\`json).\n\nHeadlines:\n${articles.map((a, i) => `${i+1}. ${a.title}`).join('\n')}`;
 
-        const response = await openai.chat.completions.create({
-          model: 'grok-2-latest',
-          messages: [{ role: 'system', content: prompt }],
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+        config: {
           temperature: 0.8,
-        });
+        }
+      });
 
-        const responseText = response.choices[0].message?.content?.trim() || '[]';
-        // Stripping accidental markdown if present
-        const jsonStr = responseText.replace(/^```(json)?\n?/, '').replace(/```$/, '').trim();
-        captions = JSON.parse(jsonStr);
-      } catch (err) {
-        console.error("Grok generation failed, falling back to templates", err);
-      }
+      const responseText = response.text || '[]';
+      const jsonStr = responseText.replace(/^```(json)?\n?/, '').replace(/```$/, '').trim();
+      captions = JSON.parse(jsonStr);
+    } catch (err) {
+      console.error("Gemini generation failed, falling back to templates", err);
+    }
+  }
+
+  return articles.map((article, i) => {
+    return {
+      article,
+      caption: captions[i] || generateMemeCaption(article),
+      accent: ACCENTS[Math.floor(Math.random() * ACCENTS.length)], 
+      categoryIcon: CATEGORY_ICONS[article.category] || CATEGORY_ICONS['general']
+    };
+  });
+}
+
+app.get('/api/memes', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = 6;
+    const allArticles = await fetchNews();
+    const startIndex = (page - 1) * limit;
+    const pageArticles = allArticles.slice(startIndex, startIndex + limit);
+
+    if (pageArticles.length === 0) {
+      return res.json({ memes: [] });
     }
 
-    const meme_cards = articles.map((article, i) => {
-      return {
-        article,
-        caption: captions[i] || generateMemeCaption(article),
-        accent: ACCENTS[i % 5],
-        categoryIcon: CATEGORY_ICONS[article.category] || CATEGORY_ICONS['general']
-      };
-    });
+    const meme_cards = await generateMemesForArticles(pageArticles);
+    res.json({ memes: meme_cards });
+  } catch (err) {
+    console.error('API /memes error', err);
+    res.status(500).json({ error: "Failed to fetch memes" });
+  }
+});
 
-    const sources_used = Array.from(new Set(articles.map(a => a.source)));
+app.get('/', async (req, res) => {
+  try {
+    const allArticles = await fetchNews();
+    const pageArticles = allArticles.slice(0, 8); // Setup initial load batch
+    const meme_cards = await generateMemesForArticles(pageArticles);
+
+    const sources_used = Array.from(new Set(allArticles.map(a => a.source)));
     const now = new Date();
     const last_updated = `${now.getDate()} ${now.toLocaleString('en-US', {month: 'short'})} ${now.getFullYear()}, ${now.toLocaleTimeString('en-US', {hour: 'numeric', minute: '2-digit', hour12: true})}`;
 
